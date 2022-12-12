@@ -1,0 +1,256 @@
+# Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# https://aws.amazon.com/agreement
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Create a Lambda function that can be referenced as a CloudFormation custom resource in templates to provide regional
+  KMS CMK key replication support.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: General Configuration
+        Parameters:
+          - pLambdaFunctionEnvironmentVariablesMaxWorkers
+    ParameterLabels:
+      pLambdaFunctionEnvironmentVariablesMaxWorkers:
+        default: Max Workers
+
+Parameters:
+  pLambdaFunctionEnvironmentVariablesMaxWorkers:
+    Type: String
+    AllowedPattern: ^\d*$
+    ConstraintDescription: The number of max workers must be a number.
+    Description: >-
+      (optional) Customize the maximum number of Python thread workers used to replicate the KMS key to the desired
+      regions.  If left blank, the maximum number of workers will be set to 3.
+
+Conditions:
+  cMaxWorkers: !Not [ !Equals [ !Ref pLambdaFunctionEnvironmentVariablesMaxWorkers, "" ] ]
+
+Resources:
+  rLambdaFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          -
+            id: W58
+            reason: >-
+              The function does have permission to write to CloudWatch Logs; however, a managed policy is not being
+              used in order to further tighten access.
+          -
+            id: W89
+            reason: VPC access is not required for the Lambda function.
+          -
+            id: W92
+            reason: Reserved concurrency is not required.
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import logging
+          import os
+          import threading
+
+          from concurrent import futures
+          from time import sleep
+          from traceback import print_exc
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          thread_local = threading.local()
+          thread_options = {
+              "max_workers": int(os.environ.get("MAX_WORKERS", 3))
+          }
+
+
+          def get_key_policy(kms_key_id: str) -> str:
+              """Return the key policy for the specified KMS key ID.
+
+              :param kms_key_id: The KMS key ID.
+              :return: The key policy for the KMS key formatted as a JSON-string.
+              """
+              kms_client = boto3.session.Session().client("kms")
+
+              logger.info(f"Retrieving key policy for \"{kms_key_id}\".")
+
+              return kms_client.get_key_policy(
+                  KeyId=kms_key_id,
+                  PolicyName="default"
+              )["Policy"]
+
+
+          def get_kms_client() -> "botocore.client.KMS":
+              """Return a thread-safe boto3 KMS client.
+
+              :param: None
+              :return: A boto3 KMS client dedicated to the specific thread.
+              """
+              if not hasattr(thread_local, "kms_client"):
+                  session = boto3.session.Session()
+                  thread_local.kms_client = session.client("kms")
+
+              return thread_local.kms_client
+
+
+          def handler(event: dict, context: dict) -> None:
+              """The entrypoint for the KMS Key Replication Lambda function.
+
+              Threading is used to parallelize the replication of the specified KMS key
+              in order to reduce execution time.
+
+              :param event: The execution event details.
+              :param context: The environment execution context.
+              :return: None
+              """
+              properties = event["ResourceProperties"]
+              request_type = event["RequestType"]
+
+              status = cfnresponse.SUCCESS
+
+              kms_key_id = properties["KMSKeyID"]
+              replication_regions = properties["ReplicationRegions"]
+
+              try:
+                  if request_type == "Create":
+                      key_policy = get_key_policy(kms_key_id)
+
+                      with futures.ThreadPoolExecutor(**thread_options) as executor:
+                          for future in executor.map(
+                              lambda replication_region:
+                                  replicate_key(
+                                      kms_key_id,
+                                      replication_region,
+                                      key_policy
+                                  ),
+                              replication_regions
+                          ):
+                              __ = future
+
+              except Exception:
+                  print_exc()
+
+                  status = cfnresponse.FAILED
+
+              cfnresponse.send(event, context, status, {})
+
+
+          def replicate_key(
+              kms_key_id: str,
+              replication_region: str,
+              key_policy: str
+          ) -> None:
+              """Threaded.  Replicate the specified KMS key to the specified region.
+              Each thread is a specific region of the list originally passed to the
+              function.
+
+              :param kms_key_id: The KMS key ID.
+              :param replication_region:
+                  The regions in which to replicate the KMS key.
+              :param key_policy:
+                  The key policy for the KMS key formatted as a JSON-string.
+              :return: None
+              """
+              kms_client = get_kms_client()
+
+              kms_client.replicate_key(
+                  BypassPolicyLockoutSafetyCheck=True,
+                  Description="Replicated KMS CMK.",
+                  KeyId=kms_key_id,
+                  Policy=key_policy,
+                  ReplicaRegion=replication_region,
+              )
+
+              logger.info(
+                  f"\"{kms_key_id}\" replicated to "
+                  f"\"{replication_region}\" successfully."
+              )
+
+      Description: >-
+        Function that may be referenced as a CloudFormation custom resource in templates to provide regional KMS CMK
+        key replication support.
+      Environment: !If
+        - cMaxWorkers
+        -
+          Variables:
+            MAX_WORKERS: pLambdaFunctionEnvironmentVariablesMaxWorkers
+        - !Ref AWS::NoValue
+      FunctionName: KMSCMKKeyReplicationFunction
+      Handler: index.handler
+      Role: !GetAtt rLambdaFunctionIAMRole.Arn
+      Runtime: python3.9
+      Timeout: 900
+
+  rLambdaFunctionIAMRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          -
+            id: W11
+            reason: The * resource is required for the kms:CreateKey action.
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          -
+            Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: 2012-10-17
+      Policies:
+        -
+          PolicyDocument:
+            Statement:
+              -
+                Action:
+                  - kms:CreateKey
+                Effect: Allow
+                Resource: "*"
+              -
+                Action:
+                  - kms:DescribeKey
+                  - kms:GetKeyPolicy
+                  - kms:ReplicateKey
+                  - kms:TagResource
+                Effect: Allow
+                Resource: !Sub arn:aws:kms:*:${ AWS::AccountId }:key/*
+              -
+                Action:
+                  - logs:CreateLogGroup
+                Effect: Allow
+                Resource:
+                  - !Sub arn:${ AWS::Partition }:logs:${ AWS::Region }:${ AWS::AccountId }:log-group:/aws/lambda/KMSCMKKeyReplicationFunction
+              -
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource:
+                  - !Sub arn:${ AWS::Partition }:logs:${ AWS::Region }:${ AWS::AccountId }:log-group:/aws/lambda/KMSCMKKeyReplicationFunction:log-stream:*
+            Version: 2012-10-17
+          PolicyName: KMSKeyReplicationExecutionRolePolicy
+
+  rLambdaFunctionLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          -
+            id: W84
+            reason: Encrypting the simple Lambda function output for this narrow use-case is not required.
+    Properties:
+      LogGroupName: /aws/lambda/KMSCMKKeyReplicationFunction
+      RetentionInDays: 14
+
+Outputs:
+  oLambdaFunctionArn:
+    Description: The ARN of the KMS CMK key replication Lambda function.
+    Value: !GetAtt rLambdaFunction.Arn

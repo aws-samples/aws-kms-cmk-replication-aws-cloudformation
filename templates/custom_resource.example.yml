@@ -1,0 +1,21 @@
+Parameters:
+  pReplicationKMSCMK:
+    Type: String
+    Description: The ARN of the KMS CMK for which replication is desired.
+
+  pReplicationLambdaFunctionArn:
+    Type: String
+    Description: The ARN of the KMS CMK key replication Lambda function.
+
+  pReplicationRegions:
+    Type: CommaDelimitedList
+    Description:
+      A comma-separated list of regions (e.g. us-east-1, us-west-2) to serve as key replication target locations.
+
+Resources:
+  rReplicationCustomResource:
+    Type: Custom::KeyReplica
+    Properties:
+      KMSKeyID: !Ref pReplicationKMSCMK
+      ReplicationRegions: !Ref pReplicationRegions
+      ServiceToken: !Ref pReplicationLambdaFunctionArn
