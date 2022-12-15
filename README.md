@@ -1,6 +1,6 @@
 ## AWS KMS CMK Key Replication for AWS CloudFormation
 
-Using AWS CloudFormation templates to deploy resources is a primary focus in using infrastructure as code (IaC) within AWS.  However, some aspects of services are not supported by CloudFormation and must be done manually or with other solutions—KMS CMK key replication being one.  While CloudFormation supports creating KMS CMKs natively, replicating any key created must be done out of band of the stack creating an extra process step.  This solution aims to allow this functionality via a CloudFormation custom resource that will reference a Lambda function deployed by the product so as to provide automated KMS CMK key replication within any CloudFormation template where that functionality is desired.
+Using AWS CloudFormation templates to deploy resources is a primary focus in using infrastructure as code (IaC) within AWS.  However, some aspects of services are not supported by CloudFormation and must be done manually or with other solutions—KMS CMK key replication being one.  While CloudFormation supports creating KMS CMKs natively, replicating any key created must be done out of band of the stack creating an extra process step.  This solution aims to allow this functionality via a CloudFormation custom resource that will reference a Lambda function deployed by the product and is aimed for use with complex architectural stacks that are creating or making use of KMS CMKs where key replication is a desired functionality as part of said stack.
 
 ## Usage
 
