@@ -1,8 +1,4 @@
 Parameters:
-  pReplicationKMSCMK:
-    Type: String
-    Description: The ARN of the KMS CMK for which replication is desired.
-
   pReplicationLambdaFunctionArn:
     Type: String
     Description: The ARN of the KMS CMK key replication Lambda function.
@@ -13,9 +9,27 @@ Parameters:
       A comma-separated list of regions (e.g. us-east-1, us-west-2) to serve as key replication target locations.
 
 Resources:
+  rKMSKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Example KMS multi-region CMK to be replicated.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Statement:
+          -
+            Action: kms:*
+            Effect: Allow
+            Principal:
+              AWS: !Ref AWS::AccountId
+            Resource: "*"
+        Version: 2012-10-17
+      MultiRegion: true
+
   rReplicationCustomResource:
     Type: Custom::KeyReplica
     Properties:
-      KMSKeyID: !Ref pReplicationKMSCMK
+      KMSKeyID: !Ref rKMSKey
       ReplicationRegions: !Ref pReplicationRegions
       ServiceToken: !Ref pReplicationLambdaFunctionArn
